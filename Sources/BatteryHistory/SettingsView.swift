@@ -18,7 +18,7 @@ struct SettingsView: View {
             LabeledContent("Collection", value: "Every minute, plus power changes")
             LabeledContent("History", value: "Kept indefinitely on this Mac")
             LabeledContent("System history", value: model.preview ? "Disabled in preview" : model.backfillStatus)
-            Text("Recording continues when the history window is closed. On startup, available system readings fill missing minutes. Time without readings remains a gap.")
+            Text("Recording continues when the history window is closed. Available system readings fill missing minutes on startup and after wake. Time without readings remains a gap.")
                 .font(.callout).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)

@@ -30,6 +30,8 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
     private var historyWindow: NSWindow?
     private var startup: Task<Void, Never>?
     private var backfillTask: Task<Void, Never>?
+    private var backfillGeneration: UUID?
+    private var wakeBackfillPending = false
 
     var statusText: String {
         if let current { return "\(Int(current.percent.rounded()))% · \(current.state.label)" }
@@ -73,7 +75,11 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
             ready = true
             if !preview, !stopping {
                 collect()
-                if let store { startBackfill(store: store, cutoff: cutoff) }
+                if let store {
+                    let backfillCutoff = wakeBackfillPending ? Date() : cutoff
+                    wakeBackfillPending = false
+                    startBackfill(store: store, cutoff: backfillCutoff)
+                }
             }
         }
         if preview { return }
@@ -105,10 +111,15 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
         })
         observers.append(notifications.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !self.stopping else { return }
                 self.session = UUID()
                 self.suspended = false
                 self.collect()
+                if let store = self.store {
+                    self.startBackfill(store: store, cutoff: Date())
+                } else {
+                    self.wakeBackfillPending = true
+                }
             }
         })
         if !UserDefaults.standard.bool(forKey: "didConfigureLogin") {
@@ -118,6 +129,9 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func startBackfill(store: HistoryStore, cutoff: Date) {
+        backfillTask?.cancel()
+        let generation = UUID()
+        backfillGeneration = generation
         backfillStatus = "Checking system history…"
         backfillTask = Task {
             let reader = Task.detached(priority: .utility) {
@@ -131,11 +145,14 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
                 }
                 try Task.checkCancellation()
                 let count = try await store.backfill(samples, before: cutoff)
+                guard !Task.isCancelled, backfillGeneration == generation else { return }
                 backfillStatus = count == 0 ? "No missing system history" : "Filled \(count.formatted()) history minutes"
                 if count > 0 { revision += 1 }
             } catch is CancellationError {
+                guard !stopping, backfillGeneration == generation else { return }
                 backfillStatus = "System history check cancelled"
             } catch {
+                guard !Task.isCancelled, backfillGeneration == generation else { return }
                 backfillStatus = error.localizedDescription
             }
         }

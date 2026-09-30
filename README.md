@@ -35,8 +35,8 @@ Builds target the current Mac's architecture rather than producing a universal a
 - Offers 1H, 24H, 7D, 30D, All, and custom date ranges with hover details.
 - Shows the current state, drain rate in `%/hr`, and remaining battery time in the menu bar popover. The drain rate says “Measuring…” until ten minutes of uninterrupted readings are available.
 - Shows recent drain/charging rates in `%/hr` and macOS time estimates in history.
-- On startup, fills each missing minute with the latest available Powerlog battery level and state, preserving actual app and system readings.
-- Carries the latest Powerlog reading forward through the startup minute when system samples are sparse.
+- On startup and after waking, fills each missing minute with the latest available Powerlog battery level and state, preserving actual app and system readings.
+- Carries the latest Powerlog reading forward through the last complete minute before each check when system samples are sparse.
 - Closing history keeps recording; Quit stops it.
 - Summoning history moves its window to the active Space; it is not shown on all Spaces.
 
@@ -49,12 +49,12 @@ History is retained indefinitely at:
 Timestamps are stored as UTC microseconds, displayed in local time. DuckDB uses
 column compression at checkpoint; an active write-ahead log is normal. Rates
 need at least ten minutes in an uninterrupted power state. macOS estimates are
-shown only when available. At each startup, the app reads available history from
+shown only when available. At startup and after each wake, the app reads available history from
 `/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL` in the background.
-It imports valid readings for empty UTC minutes before startup's current minute,
+It imports valid readings for empty UTC minutes before the check's current minute,
 retaining original timestamps for real samples and carrying the latest known value
-forward for missing minutes. This keeps the available Powerlog history continuous
-through startup; carried values are estimates, not new battery measurements.
+forward for missing minutes. This fills sleep gaps when Powerlog retained samples
+for that interval; carried values are estimates, not new battery measurements.
 Existing readings are never replaced, and repeated checks do not duplicate imports.
 Imported sessions stay separate for
 rate calculations, while the graph connects through imported readings when the
@@ -62,8 +62,8 @@ power state is unchanged and adjacent samples are at most three minutes apart.
 Historical time estimates are unavailable. Only the current system
 log is checked, and its retention varies. Failure to read Powerlog is nonfatal:
 if the database is missing, unreadable, locked, or incompatible, Settings reports
-that status and normal battery recording continues. The app retries backfill on
-the next startup. Preview mode skips system history.
+that status and normal battery recording continues. The app retries backfill at
+the next wake or startup. Preview mode skips system history.
 
 ## Tests
 
