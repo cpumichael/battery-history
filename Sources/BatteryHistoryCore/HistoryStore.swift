@@ -1,0 +1,205 @@
+import Foundation
+import class DuckDB.Database
+import class DuckDB.Connection
+import class DuckDB.PreparedStatement
+import class DuckDB.Appender
+import struct DuckDB.ResultSet
+
+public struct HistoryPlot: Sendable {
+    public let segments: [[BatteryReading]]
+    public let sampleCount: Int
+    public init(segments: [[BatteryReading]], sampleCount: Int) {
+        self.segments = segments
+        self.sampleCount = sampleCount
+    }
+}
+
+public actor HistoryStore {
+    private let database: Database
+    private let connection: Connection
+    public let url: URL
+
+    public static var defaultURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Battery History", isDirectory: true)
+            .appendingPathComponent("history.duckdb")
+    }
+
+    public init(url: URL = HistoryStore.defaultURL) throws {
+        self.url = url
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        database = try Database(store: .file(at: url))
+        connection = try database.connect()
+        try connection.execute("SET threads = 2; SET memory_limit = '128MB';")
+        try connection.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+        let versions = try connection.query("SELECT version FROM schema_version")
+        if versions.rowCount > 0, versions[0].cast(to: Int.self)[0] != 1 {
+            throw StoreError.unsupportedSchema
+        }
+        try connection.execute("BEGIN TRANSACTION")
+        do {
+            try connection.execute("""
+                CREATE TABLE IF NOT EXISTS readings (
+                    id VARCHAR PRIMARY KEY,
+                    timestamp_us BIGINT NOT NULL,
+                    percent DOUBLE NOT NULL CHECK (percent >= 0 AND percent <= 100),
+                    state VARCHAR NOT NULL CHECK (state IN ('battery', 'charging', 'pluggedIn')),
+                    session VARCHAR NOT NULL,
+                    time_to_empty INTEGER,
+                    time_to_full INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id VARCHAR PRIMARY KEY, started_us BIGINT NOT NULL,
+                    ended_us BIGINT, end_reason VARCHAR
+                );
+                INSERT INTO schema_version SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);
+                COMMIT;
+                """)
+        } catch {
+            try? connection.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func append(_ reading: BatteryReading) throws {
+        try append([reading])
+    }
+
+    /// Batch insertion also supports import-free synthetic validation with one transaction.
+    public func append(_ readings: [BatteryReading]) throws {
+        guard !readings.isEmpty else { return }
+        let sessionInsert = try PreparedStatement(connection: connection,
+            query: "INSERT INTO sessions (id, started_us) VALUES (?, ?) ON CONFLICT DO NOTHING")
+        try connection.execute("BEGIN TRANSACTION")
+        do {
+            for reading in Dictionary(grouping: readings, by: \.session).values.compactMap({ $0.first }) {
+                try sessionInsert.bind(reading.session.uuidString, at: 1)
+                try sessionInsert.bind(Self.micros(reading.timestamp), at: 2)
+                _ = try sessionInsert.execute()
+            }
+            let appender = try Appender(connection: connection, table: "readings")
+            for reading in readings {
+                try appender.append(reading.id.uuidString)
+                try appender.append(Self.micros(reading.timestamp))
+                try appender.append(reading.percent)
+                try appender.append(reading.state.rawValue)
+                try appender.append(reading.session.uuidString)
+                try appender.append(reading.timeToEmpty.map(Int32.init))
+                try appender.append(reading.timeToFull.map(Int32.init))
+                try appender.endRow()
+            }
+            try appender.flush()
+            try connection.execute("COMMIT")
+        } catch {
+            try? connection.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    public func endSession(_ session: UUID, at date: Date, reason: String) throws {
+        let statement = try PreparedStatement(connection: connection,
+            query: "UPDATE sessions SET ended_us = ?, end_reason = ? WHERE id = ?")
+        try statement.bind(Self.micros(date), at: 1)
+        try statement.bind(reason, at: 2)
+        try statement.bind(session.uuidString, at: 3)
+        _ = try statement.execute()
+    }
+
+    public func readings(from start: Date, to end: Date) throws -> [BatteryReading] {
+        let statement = try PreparedStatement(connection: connection,
+            query: "SELECT * FROM readings WHERE timestamp_us >= ? AND timestamp_us <= ? ORDER BY timestamp_us, id")
+        try statement.bind(Self.micros(start), at: 1)
+        try statement.bind(Self.micros(end), at: 2)
+        return try Self.decode(statement.execute())
+    }
+
+    public func chart(from start: Date, to end: Date, buckets: Int = 600) throws -> HistoryPlot {
+        let low = Self.micros(start), high = Self.micros(end)
+        let width = max(1, (high - low) / Int64(max(1, buckets)))
+        // Find segments before reducing points. Otherwise a wide time bucket could
+        // hide a brief power change or reconnect a line across sleep.
+        let statement = try PreparedStatement(connection: connection, query: """
+            WITH previous AS (
+                SELECT id, timestamp_us, percent, state, session, lag(timestamp_us) OVER w AS prev_time,
+                    lag(state) OVER w AS prev_state, lag(session) OVER w AS prev_session
+                FROM readings WHERE timestamp_us >= ? AND timestamp_us <= ?
+                WINDOW w AS (ORDER BY timestamp_us, id)
+            ), segmented AS (
+                SELECT *, sum(CASE WHEN prev_time IS NULL OR prev_session <> session
+                    OR prev_state <> state OR timestamp_us - prev_time > 180000000
+                    OR timestamp_us <= prev_time THEN 1 ELSE 0 END)
+                    OVER (ORDER BY timestamp_us, id ROWS UNBOUNDED PRECEDING) AS segment_id,
+                    floor((timestamp_us - ?) / ?)::BIGINT AS bucket
+                FROM previous
+            ), grouped AS MATERIALIZED (
+                SELECT segment_id, bucket, arg_min(id, timestamp_us) AS first_id,
+                    arg_max(id, timestamp_us) AS last_id, arg_min(id, percent) AS minimum_id,
+                    arg_max(id, percent) AS maximum_id, count(*) AS n
+                FROM segmented GROUP BY segment_id, bucket
+            ), selected AS (
+                SELECT DISTINCT unnest([first_id, last_id, minimum_id, maximum_id]) AS id, segment_id
+                FROM grouped
+            ), counts AS (
+                SELECT sum(n)::BIGINT AS total FROM grouped
+            )
+            SELECT r.id, r.timestamp_us, r.percent, r.state, r.session, r.time_to_empty, r.time_to_full,
+                s.segment_id::BIGINT, c.total
+            FROM selected s JOIN readings r ON r.id = s.id CROSS JOIN counts c
+            ORDER BY r.timestamp_us, r.id
+            """)
+        try statement.bind(low, at: 1)
+        try statement.bind(high, at: 2)
+        try statement.bind(low, at: 3)
+        try statement.bind(width, at: 4)
+        let result = try statement.execute()
+        let decoded = Self.decode(result)
+        let ids = result[7].cast(to: Int64.self)
+        var segments: [[BatteryReading]] = []
+        var lastID: Int64?
+        for (index, reading) in decoded.enumerated() {
+            let segmentID = ids[UInt64(index)]
+            if segmentID == lastID, !segments.isEmpty {
+                segments[segments.count - 1].append(reading)
+            } else {
+                segments.append([reading])
+            }
+            lastID = segmentID
+        }
+        let count = result.rowCount > 0 ? Int(result[8].cast(to: Int64.self)[0] ?? 0) : 0
+        return HistoryPlot(segments: segments, sampleCount: count)
+    }
+
+    public func firstDate() throws -> Date? {
+        let result = try connection.query("SELECT min(timestamp_us) FROM readings")
+        return result[0].cast(to: Int64.self)[0].map(Self.date)
+    }
+
+    public func checkpoint() throws { try connection.execute("CHECKPOINT") }
+
+    public func compressionTypes() throws -> [String] {
+        let result = try connection.query("SELECT DISTINCT compression FROM pragma_storage_info('readings')")
+        return result[0].cast(to: String.self).compactMap { $0 }
+    }
+
+    private static func micros(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1_000_000).rounded()) }
+    private static func date(_ micros: Int64) -> Date { Date(timeIntervalSince1970: Double(micros) / 1_000_000) }
+
+    private static func decode(_ result: ResultSet) -> [BatteryReading] {
+        let ids = result[0].cast(to: String.self), times = result[1].cast(to: Int64.self)
+        let percents = result[2].cast(to: Double.self), states = result[3].cast(to: String.self)
+        let sessions = result[4].cast(to: String.self)
+        let empty = result[5].cast(to: Int32.self), full = result[6].cast(to: Int32.self)
+        return (0..<result.rowCount).compactMap { i in
+            guard let id = ids[i].flatMap(UUID.init(uuidString:)), let time = times[i],
+                  let percent = percents[i], let state = states[i].flatMap(PowerState.init(rawValue:)),
+                  let session = sessions[i].flatMap(UUID.init(uuidString:)) else { return nil }
+            return BatteryReading(id: id, timestamp: date(time), percent: percent, state: state,
+                session: session, timeToEmpty: empty[i].map(Int.init), timeToFull: full[i].map(Int.init))
+        }
+    }
+
+    public enum StoreError: LocalizedError {
+        case unsupportedSchema
+        public var errorDescription: String? { "This history was created by a newer version of Battery History." }
+    }
+}
