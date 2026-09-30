@@ -13,7 +13,8 @@ let package = Package(
         .package(url: "https://github.com/duckdb/duckdb-swift.git", exact: "1.1.3")
     ],
     targets: [
-        .target(name: "BatteryHistoryCore", dependencies: [.product(name: "DuckDB", package: "duckdb-swift")]),
+        .target(name: "BatteryHistoryCore", dependencies: [.product(name: "DuckDB", package: "duckdb-swift")],
+                linkerSettings: [.linkedLibrary("sqlite3")]),
         .executableTarget(name: "BatteryHistory", dependencies: ["BatteryHistoryCore"]),
         .executableTarget(name: "HistoryStorageProbe", dependencies: ["BatteryHistoryCore"]),
         .testTarget(name: "BatteryHistoryCoreTests", dependencies: ["BatteryHistoryCore"])

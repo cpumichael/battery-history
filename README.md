@@ -34,7 +34,8 @@ Builds target the current Mac's architecture rather than producing a universal a
 - Plots percentage and distinguishes battery, charging, and plugged-in states.
 - Offers 1H, 24H, 7D, 30D, All, and custom date ranges with hover details.
 - Shows recent drain/charging rates in percentage points per hour and macOS time estimates.
-- Leaves gaps across sleep, app restarts, and missed sampling intervals.
+- On startup, fills missing minutes from available macOS Powerlog battery readings, preserving existing samples.
+- Leaves gaps where neither the app nor Powerlog recorded readings.
 - Closing history keeps recording; Quit stops it.
 - Summoning history moves its window to the active Space; it is not shown on all Spaces.
 
@@ -47,7 +48,16 @@ History is retained indefinitely at:
 Timestamps are stored as UTC microseconds, displayed in local time. DuckDB uses
 column compression at checkpoint; an active write-ahead log is normal. Rates
 need at least ten minutes in an uninterrupted power state. macOS estimates are
-shown only when available. Existing macOS battery history cannot be imported.
+shown only when available. At each startup, the app reads available history from
+`/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL` in the background.
+It imports the latest valid reading for each empty UTC minute before startup's
+current minute, retaining original timestamps. Existing readings are never replaced,
+and repeated checks do not duplicate imports. Imported sessions stay separate from
+live collection; historical time estimates are unavailable. Only the current system
+log is checked, and its retention varies. Failure to read Powerlog is nonfatal:
+if the database is missing, unreadable, locked, or incompatible, Settings reports
+that status and normal battery recording continues. The app retries backfill on
+the next startup. Preview mode skips system history.
 
 ## Tests
 
@@ -58,7 +68,12 @@ swift test -j 4
 Tests cover battery parsing, missing estimates, charging and drain rates,
 session/gap handling, transaction rollback, persistence, time-range selection,
 chart reduction, recovery after abrupt process exit, and a full year of one-minute
-samples with compression inspection. `HistoryStorageProbe` is a test helper,
+samples with compression inspection. Powerlog fixtures cover validation, missing or
+locked databases, minute selection, preservation of existing readings, repeat imports,
+session boundaries, cancellation, and rollback. To also check this Mac’s real
+Powerlog against a temporary history database, run
+`BATTERY_HISTORY_CHECK_POWERLOG=1 swift test -j 4 --filter PowerlogTests`.
+`HistoryStorageProbe` is a test helper,
 not part of the shipped app.
 
 Manual hardware checks: unplug/replug power; sleep/wake; close and reopen the

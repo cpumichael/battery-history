@@ -17,7 +17,8 @@ struct SettingsView: View {
             if let error = model.loginError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
             LabeledContent("Collection", value: "Every minute, plus power changes")
             LabeledContent("History", value: "Kept indefinitely on this Mac")
-            Text("Recording continues when the history window is closed. Sleep and time with the app quit appear as gaps.")
+            LabeledContent("System history", value: model.preview ? "Disabled in preview" : model.backfillStatus)
+            Text("Recording continues when the history window is closed. On startup, available system readings fill missing minutes. Time without readings remains a gap.")
                 .font(.callout).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)

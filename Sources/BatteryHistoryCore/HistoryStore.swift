@@ -65,35 +65,111 @@ public actor HistoryStore {
         try append([reading])
     }
 
-    /// Batch insertion also supports import-free synthetic validation with one transaction.
+    /// Insert a batch atomically, including its sessions.
     public func append(_ readings: [BatteryReading]) throws {
         guard !readings.isEmpty else { return }
-        let sessionInsert = try PreparedStatement(connection: connection,
-            query: "INSERT INTO sessions (id, started_us) VALUES (?, ?) ON CONFLICT DO NOTHING")
         try connection.execute("BEGIN TRANSACTION")
         do {
-            for reading in Dictionary(grouping: readings, by: \.session).values.compactMap({ $0.first }) {
-                try sessionInsert.bind(reading.session.uuidString, at: 1)
-                try sessionInsert.bind(Self.micros(reading.timestamp), at: 2)
-                _ = try sessionInsert.execute()
-            }
-            let appender = try Appender(connection: connection, table: "readings")
-            for reading in readings {
-                try appender.append(reading.id.uuidString)
-                try appender.append(Self.micros(reading.timestamp))
-                try appender.append(reading.percent)
-                try appender.append(reading.state.rawValue)
-                try appender.append(reading.session.uuidString)
-                try appender.append(reading.timeToEmpty.map(Int32.init))
-                try appender.append(reading.timeToFull.map(Int32.init))
-                try appender.endRow()
-            }
-            try appender.flush()
+            try insertRows(readings)
             try connection.execute("COMMIT")
         } catch {
             try? connection.execute("ROLLBACK")
             throw error
         }
+    }
+
+    /// Fill empty UTC minutes with actual system samples; existing readings always win.
+    public func backfill(_ candidates: [BatteryReading], before cutoff: Date) throws -> Int {
+        let end = floor(cutoff.timeIntervalSince1970 / 60) * 60
+        var latest: [Int64: BatteryReading] = [:]
+        for reading in candidates {
+            let time = reading.timestamp.timeIntervalSince1970
+            guard time.isFinite, time >= 0, time < end, time < 253_402_300_800,
+                  reading.percent.isFinite, (0...100).contains(reading.percent) else { continue }
+            let timestampUS = Self.micros(reading.timestamp)
+            guard Double(timestampUS) < end * 1_000_000 else { continue }
+            let minute = timestampUS / 60_000_000
+            if latest[minute].map({ $0.timestamp > reading.timestamp }) == true { continue }
+            latest[minute] = reading
+        }
+        let minutes = latest.keys.sorted()
+        guard let first = minutes.first, let last = minutes.last else { return 0 }
+        try connection.execute("BEGIN TRANSACTION")
+        do {
+            let query = try PreparedStatement(connection: connection, query: """
+                SELECT DISTINCT floor(timestamp_us / 60000000.0)::BIGINT FROM readings
+                WHERE timestamp_us >= ? AND timestamp_us < ?
+                """)
+            try query.bind(first * 60_000_000, at: 1)
+            try query.bind((last + 1) * 60_000_000, at: 2)
+            let result = try query.execute()
+            let occupied = Set(result[0].cast(to: Int64.self).compactMap { $0 })
+            var imported: [BatteryReading] = []
+            var session = UUID()
+            var previous: BatteryReading?
+            var previousMinute: Int64?
+            // Occupied minutes without Powerlog samples must also split an imported run.
+            let occupiedMinutes = occupied.sorted()
+            var occupiedIndex = 0
+            for minute in minutes {
+                var crossedOccupied = false
+                while occupiedIndex < occupiedMinutes.count, occupiedMinutes[occupiedIndex] <= minute {
+                    if previousMinute.map({ occupiedMinutes[occupiedIndex] > $0 }) ?? true {
+                        crossedOccupied = true
+                    }
+                    occupiedIndex += 1
+                }
+                if occupied.contains(minute) {
+                    previous = nil
+                    continue
+                }
+                guard let sample = latest[minute] else { continue }
+                if previous == nil || crossedOccupied ||
+                    sample.timestamp.timeIntervalSince(previous!.timestamp) > HistoryAnalysis.maximumGap {
+                    session = UUID()
+                }
+                let reading = BatteryReading(id: sample.id, timestamp: sample.timestamp,
+                    percent: sample.percent, state: sample.state, session: session)
+                imported.append(reading)
+                previous = reading
+                previousMinute = minute
+            }
+            try insertRows(imported)
+            for group in Dictionary(grouping: imported, by: \.session).values {
+                if let last = group.last {
+                    try endSession(last.session, at: last.timestamp, reason: "powerlog import")
+                }
+            }
+            try connection.execute("COMMIT")
+            return imported.count
+        } catch {
+            try? connection.execute("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Caller owns the transaction so imports can compare and insert without interleaving.
+    private func insertRows(_ readings: [BatteryReading]) throws {
+        guard !readings.isEmpty else { return }
+        let sessionInsert = try PreparedStatement(connection: connection,
+            query: "INSERT INTO sessions (id, started_us) VALUES (?, ?) ON CONFLICT DO NOTHING")
+        for reading in Dictionary(grouping: readings, by: \.session).values.compactMap({ $0.first }) {
+            try sessionInsert.bind(reading.session.uuidString, at: 1)
+            try sessionInsert.bind(Self.micros(reading.timestamp), at: 2)
+            _ = try sessionInsert.execute()
+        }
+        let appender = try Appender(connection: connection, table: "readings")
+        for reading in readings {
+            try appender.append(reading.id.uuidString)
+            try appender.append(Self.micros(reading.timestamp))
+            try appender.append(reading.percent)
+            try appender.append(reading.state.rawValue)
+            try appender.append(reading.session.uuidString)
+            try appender.append(reading.timeToEmpty.map(Int32.init))
+            try appender.append(reading.timeToFull.map(Int32.init))
+            try appender.endRow()
+        }
+        try appender.flush()
     }
 
     public func endSession(_ session: UUID, at date: Date, reason: String) throws {

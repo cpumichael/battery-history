@@ -11,6 +11,7 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
     @Published var rate: Double?
     @Published var storageError: String?
     @Published var loginError: String?
+    @Published var backfillStatus = "Waiting to check system history"
     @Published var ready = false
     @Published var revision = 0
     @Published var historyVisible = false
@@ -27,6 +28,8 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
     private var stopping = false
     private var writes: Task<Void, Never>?
     private var historyWindow: NSWindow?
+    private var startup: Task<Void, Never>?
+    private var backfillTask: Task<Void, Never>?
 
     var statusText: String {
         if let current { return "\(Int(current.percent.rounded()))% · \(current.state.label)" }
@@ -35,7 +38,8 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
 
     func start() {
         guard timer == nil else { return }
-        Task {
+        let cutoff = Date()
+        startup = Task {
             do {
                 let url = preview ? FileManager.default.temporaryDirectory
                     .appendingPathComponent("BatteryHistoryPreview-\(UUID())/history.duckdb") : HistoryStore.defaultURL
@@ -67,7 +71,10 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
                 storageError = error.localizedDescription
             }
             ready = true
-            if !preview { collect() }
+            if !preview, !stopping {
+                collect()
+                if let store { startBackfill(store: store, cutoff: cutoff) }
+            }
         }
         if preview { return }
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
@@ -107,6 +114,30 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
         if !UserDefaults.standard.bool(forKey: "didConfigureLogin") {
             setLaunchAtLogin(true)
             UserDefaults.standard.set(true, forKey: "didConfigureLogin")
+        }
+    }
+
+    private func startBackfill(store: HistoryStore, cutoff: Date) {
+        backfillStatus = "Checking system history…"
+        backfillTask = Task {
+            let reader = Task.detached(priority: .utility) {
+                try PowerlogSource.read(before: cutoff)
+            }
+            do {
+                let samples = try await withTaskCancellationHandler {
+                    try await reader.value
+                } onCancel: {
+                    reader.cancel()
+                }
+                try Task.checkCancellation()
+                let count = try await store.backfill(samples, before: cutoff)
+                backfillStatus = count == 0 ? "No missing system readings to import" : "Imported \(count) system readings"
+                if count > 0 { revision += 1 }
+            } catch is CancellationError {
+                backfillStatus = "System history check cancelled"
+            } catch {
+                backfillStatus = error.localizedDescription
+            }
         }
     }
 
@@ -152,6 +183,9 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
         checkpointTimer?.invalidate()
         if let powerSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes) }
         for observer in observers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        await startup?.value
+        backfillTask?.cancel()
+        await backfillTask?.value
         endSession(reason: "quit")
         await writes?.value
         if let store { try? await store.checkpoint() }
