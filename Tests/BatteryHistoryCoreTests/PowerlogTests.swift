@@ -121,7 +121,7 @@ final class PowerlogTests: XCTestCase {
         XCTAssertEqual(rows[3].session, rows[4].session)
         XCTAssertNil(HistoryAnalysis.rate(rows))
         let chart = try await store.chart(from: origin, to: origin.addingTimeInterval(660))
-        XCTAssertEqual(chart.segments.count, 3)
+        XCTAssertEqual(chart.segments.count, 2)
         XCTAssertEqual(chart.sampleCount, 6)
     }
 
@@ -146,6 +146,36 @@ final class PowerlogTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty)
         let retry = try await store.backfill([sample(5), sample(65)], before: origin.addingTimeInterval(180))
         XCTAssertEqual(retry, 2)
+    }
+
+    func testBackfillConnectsRestartGapInChartButNotRates() async throws {
+        let store = try HistoryStore(url: history)
+        let before = sample(16), after = sample(266)
+        try await store.append([before, after])
+        let count = try await store.backfill([sample(115), sample(175), sample(235)],
+            before: origin.addingTimeInterval(266))
+        XCTAssertEqual(count, 3)
+        let chart = try await store.chart(from: origin, to: origin.addingTimeInterval(300))
+        XCTAssertEqual(chart.sampleCount, 5)
+        XCTAssertEqual(chart.segments.count, 1)
+        XCTAssertEqual(chart.segments.first?.first?.id, before.id)
+        XCTAssertEqual(chart.segments.first?.last?.id, after.id)
+        let readings = try await store.readings(from: origin, to: origin.addingTimeInterval(300))
+        XCTAssertEqual(Set(readings.map(\.session)).count, 3)
+        XCTAssertNil(HistoryAnalysis.rate(readings))
+    }
+
+    func testBackfillChartStillBreaksForMissingDataAndPowerChanges() async throws {
+        let store = try HistoryStore(url: history)
+        let before = sample(5), after = sample(605)
+        try await store.append([before, after])
+        let charging = BatteryReading(timestamp: origin.addingTimeInterval(125), percent: 81,
+            state: .charging, session: UUID())
+        _ = try await store.backfill([sample(65), charging, sample(545)],
+            before: origin.addingTimeInterval(660))
+        let chart = try await store.chart(from: origin, to: origin.addingTimeInterval(660))
+        XCTAssertEqual(chart.segments.count, 3)
+        XCTAssertEqual(chart.segments.map { $0.count }, [2, 1, 2])
     }
 
     func testMinuteBoundaryRoundingIsIdempotent() async throws {

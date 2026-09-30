@@ -192,16 +192,22 @@ public actor HistoryStore {
     public func chart(from start: Date, to end: Date, buckets: Int = 600) throws -> HistoryPlot {
         let low = Self.micros(start), high = Self.micros(end)
         let width = max(1, (high - low) / Int64(max(1, buckets)))
-        // Find segments before reducing points. Otherwise a wide time bucket could
-        // hide a brief power change or reconnect a line across sleep.
+        // Find segments before reducing points. Imported samples can connect a
+        // session boundary when actual readings cover it, but rates still use
+        // the original sessions. Never connect state changes or long gaps.
         let statement = try PreparedStatement(connection: connection, query: """
             WITH previous AS (
-                SELECT id, timestamp_us, percent, state, session, lag(timestamp_us) OVER w AS prev_time,
-                    lag(state) OVER w AS prev_state, lag(session) OVER w AS prev_session
-                FROM readings WHERE timestamp_us >= ? AND timestamp_us <= ?
-                WINDOW w AS (ORDER BY timestamp_us, id)
+                SELECT r.id, r.timestamp_us, r.percent, r.state, r.session,
+                    coalesce(s.end_reason = 'powerlog import', false) AS imported,
+                    lag(r.timestamp_us) OVER w AS prev_time,
+                    lag(r.state) OVER w AS prev_state, lag(r.session) OVER w AS prev_session,
+                    lag(coalesce(s.end_reason = 'powerlog import', false)) OVER w AS prev_imported
+                FROM readings r LEFT JOIN sessions s ON s.id = r.session
+                WHERE r.timestamp_us >= ? AND r.timestamp_us <= ?
+                WINDOW w AS (ORDER BY r.timestamp_us, r.id)
             ), segmented AS (
-                SELECT *, sum(CASE WHEN prev_time IS NULL OR prev_session <> session
+                SELECT *, sum(CASE WHEN prev_time IS NULL
+                    OR (prev_session <> session AND NOT imported AND NOT coalesce(prev_imported, false))
                     OR prev_state <> state OR timestamp_us - prev_time > 180000000
                     OR timestamp_us <= prev_time THEN 1 ELSE 0 END)
                     OVER (ORDER BY timestamp_us, id ROWS UNBOUNDED PRECEDING) AS segment_id,

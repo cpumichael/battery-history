@@ -52,8 +52,10 @@ shown only when available. At each startup, the app reads available history from
 `/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL` in the background.
 It imports the latest valid reading for each empty UTC minute before startup's
 current minute, retaining original timestamps. Existing readings are never replaced,
-and repeated checks do not duplicate imports. Imported sessions stay separate from
-live collection; historical time estimates are unavailable. Only the current system
+and repeated checks do not duplicate imports. Imported sessions stay separate for
+rate calculations, while the graph connects through imported readings when the
+power state is unchanged and adjacent samples are at most three minutes apart.
+Historical time estimates are unavailable. Only the current system
 log is checked, and its retention varies. Failure to read Powerlog is nonfatal:
 if the database is missing, unreadable, locked, or incompatible, Settings reports
 that status and normal battery recording continues. The app retries backfill on
