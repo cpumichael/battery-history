@@ -57,7 +57,8 @@ struct HistoryView: View {
                 metric("BATTERY", value: model.current.map { "\(Int($0.percent.rounded()))%" } ?? "—",
                        detail: model.current?.state.label ?? "No internal battery found", icon: "battery.75percent")
                 metric(model.current?.state == .charging ? "CHARGING RATE" : "DRAIN RATE",
-                       value: model.rate.map { String(format: "%.1f", abs($0)) + " pp/h" } ?? "—",
+                       value: model.rate.map { String(format: "%.1f", abs($0)) + "%/hr" } ??
+                           (model.current?.state == .battery ? "Measuring…" : "—"),
                        detail: "Recent 30-minute trend", icon: "waveform.path")
                 metric(model.current?.state == .charging ? "UNTIL FULL" : "TIME REMAINING",
                        value: model.current?.estimatedMinutes.map(durationText) ?? "—",

@@ -44,7 +44,7 @@ public struct BatteryReading: Identifiable, Equatable, Sendable {
 public enum HistoryAnalysis {
     public static let maximumGap: TimeInterval = 180
 
-    /// Rate in percentage points per hour for the latest uninterrupted state.
+    /// Observed percentage change per hour for the latest uninterrupted state.
     public static func rate(_ readings: [BatteryReading]) -> Double? {
         guard let last = readings.last, last.state != .pluggedIn else { return nil }
         var segment = [last]
@@ -66,6 +66,7 @@ public enum HistoryAnalysis {
         let denominator = xs.reduce(0) { $0 + pow($1 - meanX, 2) }
         guard denominator > 0 else { return nil }
         let slope = zip(xs, ys).reduce(0) { $0 + ($1.0 - meanX) * ($1.1 - meanY) } / denominator
+        if slope == 0 { return 0 }
         guard (last.state == .battery && slope < 0) || (last.state == .charging && slope > 0) else { return nil }
         return slope
     }

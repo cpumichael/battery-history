@@ -8,9 +8,17 @@ struct BatteryHistoryApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text(model.statusText)
-            if let current = model.current, let minutes = current.estimatedMinutes {
-                Text("\(durationText(minutes)) \(current.state == .charging ? "until full" : "remaining")")
+            if let current = model.current {
+                Text("Current state · \(model.statusText)")
+                if current.state == .battery {
+                    let rateText = model.rate.map { String(format: "%.1f", abs($0)) + "%/hr" } ?? "Measuring…"
+                    Text("Drain rate · \(rateText)")
+                    if let minutes = current.timeToEmpty {
+                        Text("Remaining · \(durationText(minutes))")
+                    }
+                }
+            } else {
+                Text(model.statusText)
             }
             if model.storageError != nil { Text("History could not be saved") }
             Divider()

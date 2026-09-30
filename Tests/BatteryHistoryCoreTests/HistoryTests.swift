@@ -25,7 +25,7 @@ final class HistoryTests: XCTestCase {
 
     func testInsufficientFlatAndConflictingTrends() {
         XCTAssertNil(HistoryAnalysis.rate((0...9).map { reading($0, 80 - Double($0)) }))
-        XCTAssertNil(HistoryAnalysis.rate((0...20).map { reading($0, 80) }))
+        XCTAssertEqual(HistoryAnalysis.rate((0...20).map { reading($0, 80) })!, 0, accuracy: 0.001)
         XCTAssertNil(HistoryAnalysis.rate((0...20).map { reading($0, 40 + Double($0)) }))
         XCTAssertNil(HistoryAnalysis.rate((0...20).map { reading($0, 80 - Double($0), state: .pluggedIn) }))
     }

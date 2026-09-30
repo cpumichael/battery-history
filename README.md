@@ -33,7 +33,8 @@ Builds target the current Mac's architecture rather than producing a universal a
 - Keeps every sample, including unchanged values, in embedded DuckDB.
 - Plots percentage and distinguishes battery, charging, and plugged-in states.
 - Offers 1H, 24H, 7D, 30D, All, and custom date ranges with hover details.
-- Shows recent drain/charging rates in percentage points per hour and macOS time estimates.
+- Shows the current state, drain rate in `%/hr`, and remaining battery time in the menu bar popover. The drain rate says “Measuring…” until ten minutes of uninterrupted readings are available.
+- Shows recent drain/charging rates in `%/hr` and macOS time estimates in history.
 - On startup, fills each missing minute with the latest available Powerlog battery level and state, preserving actual app and system readings.
 - Carries the latest Powerlog reading forward through the startup minute when system samples are sparse.
 - Closing history keeps recording; Quit stops it.
