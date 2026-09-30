@@ -78,9 +78,11 @@ public actor HistoryStore {
         }
     }
 
-    /// Fill empty UTC minutes with actual system samples; existing readings always win.
+    /// Fill empty UTC minutes with the latest system sample known by that minute.
+    /// Real samples and app readings are kept; held values extend to startup's cutoff.
     public func backfill(_ candidates: [BatteryReading], before cutoff: Date) throws -> Int {
         let end = floor(cutoff.timeIntervalSince1970 / 60) * 60
+        let endMinute = Int64(end / 60)
         var latest: [Int64: BatteryReading] = [:]
         for reading in candidates {
             let time = reading.timestamp.timeIntervalSince1970
@@ -92,47 +94,44 @@ public actor HistoryStore {
             if latest[minute].map({ $0.timestamp > reading.timestamp }) == true { continue }
             latest[minute] = reading
         }
-        let minutes = latest.keys.sorted()
-        guard let first = minutes.first, let last = minutes.last else { return 0 }
+        guard let firstMinute = latest.keys.min(), firstMinute < endMinute else { return 0 }
+        let lastMinute = endMinute - 1
         try connection.execute("BEGIN TRANSACTION")
         do {
             let query = try PreparedStatement(connection: connection, query: """
                 SELECT DISTINCT floor(timestamp_us / 60000000.0)::BIGINT FROM readings
                 WHERE timestamp_us >= ? AND timestamp_us < ?
                 """)
-            try query.bind(first * 60_000_000, at: 1)
-            try query.bind((last + 1) * 60_000_000, at: 2)
+            try query.bind(firstMinute * 60_000_000, at: 1)
+            try query.bind(endMinute * 60_000_000, at: 2)
             let result = try query.execute()
             let occupied = Set(result[0].cast(to: Int64.self).compactMap { $0 })
             var imported: [BatteryReading] = []
             var session = UUID()
             var previous: BatteryReading?
-            var previousMinute: Int64?
-            // Occupied minutes without Powerlog samples must also split an imported run.
-            let occupiedMinutes = occupied.sorted()
-            var occupiedIndex = 0
-            for minute in minutes {
-                var crossedOccupied = false
-                while occupiedIndex < occupiedMinutes.count, occupiedMinutes[occupiedIndex] <= minute {
-                    if previousMinute.map({ occupiedMinutes[occupiedIndex] > $0 }) ?? true {
-                        crossedOccupied = true
-                    }
-                    occupiedIndex += 1
-                }
+            var lastKnown: BatteryReading?
+            for minute in firstMinute...lastMinute {
+                if let sample = latest[minute] { lastKnown = sample }
+                guard let sample = lastKnown else { continue }
                 if occupied.contains(minute) {
+                    // Preserve the app's original reading, but use the real Powerlog
+                    // observation as the starting value for subsequent carried minutes.
                     previous = nil
                     continue
                 }
-                guard let sample = latest[minute] else { continue }
-                if previous == nil || crossedOccupied ||
-                    sample.timestamp.timeIntervalSince(previous!.timestamp) > HistoryAnalysis.maximumGap {
+                let timestamp = latest[minute]?.timestamp ?? Date(timeIntervalSince1970: Double(minute) * 60)
+                if let previous {
+                    if previous.state != sample.state ||
+                        timestamp.timeIntervalSince(previous.timestamp) > HistoryAnalysis.maximumGap {
+                        session = UUID()
+                    }
+                } else {
                     session = UUID()
                 }
-                let reading = BatteryReading(id: sample.id, timestamp: sample.timestamp,
-                    percent: sample.percent, state: sample.state, session: session)
+                let reading = BatteryReading(timestamp: timestamp, percent: sample.percent,
+                    state: sample.state, session: session)
                 imported.append(reading)
                 previous = reading
-                previousMinute = minute
             }
             try insertRows(imported)
             for group in Dictionary(grouping: imported, by: \.session).values {

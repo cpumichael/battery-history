@@ -34,8 +34,8 @@ Builds target the current Mac's architecture rather than producing a universal a
 - Plots percentage and distinguishes battery, charging, and plugged-in states.
 - Offers 1H, 24H, 7D, 30D, All, and custom date ranges with hover details.
 - Shows recent drain/charging rates in percentage points per hour and macOS time estimates.
-- On startup, fills missing minutes from available macOS Powerlog battery readings, preserving existing samples.
-- Leaves gaps where neither the app nor Powerlog recorded readings.
+- On startup, fills each missing minute with the latest available Powerlog battery level and state, preserving actual app and system readings.
+- Carries the latest Powerlog reading forward through the startup minute when system samples are sparse.
 - Closing history keeps recording; Quit stops it.
 - Summoning history moves its window to the active Space; it is not shown on all Spaces.
 
@@ -50,9 +50,12 @@ column compression at checkpoint; an active write-ahead log is normal. Rates
 need at least ten minutes in an uninterrupted power state. macOS estimates are
 shown only when available. At each startup, the app reads available history from
 `/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL` in the background.
-It imports the latest valid reading for each empty UTC minute before startup's
-current minute, retaining original timestamps. Existing readings are never replaced,
-and repeated checks do not duplicate imports. Imported sessions stay separate for
+It imports valid readings for empty UTC minutes before startup's current minute,
+retaining original timestamps for real samples and carrying the latest known value
+forward for missing minutes. This keeps the available Powerlog history continuous
+through startup; carried values are estimates, not new battery measurements.
+Existing readings are never replaced, and repeated checks do not duplicate imports.
+Imported sessions stay separate for
 rate calculations, while the graph connects through imported readings when the
 power state is unchanged and adjacent samples are at most three minutes apart.
 Historical time estimates are unavailable. Only the current system

@@ -131,7 +131,7 @@ final class AppModel: NSObject, ObservableObject, NSWindowDelegate {
                 }
                 try Task.checkCancellation()
                 let count = try await store.backfill(samples, before: cutoff)
-                backfillStatus = count == 0 ? "No missing system readings to import" : "Imported \(count) system readings"
+                backfillStatus = count == 0 ? "No missing system history" : "Filled \(count.formatted()) history minutes"
                 if count > 0 { revision += 1 }
             } catch is CancellationError {
                 backfillStatus = "System history check cancelled"

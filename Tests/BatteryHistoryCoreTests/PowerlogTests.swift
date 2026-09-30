@@ -112,17 +112,19 @@ final class PowerlogTests: XCTestCase {
         let store = try HistoryStore(url: history)
         let candidates = [sample(5), sample(65), sample(245), sample(485), sample(545)]
         let count = try await store.backfill(candidates, before: origin.addingTimeInterval(600))
-        XCTAssertEqual(count, 5)
+        XCTAssertEqual(count, 10)
         let live = sample(605, percent: 70)
         try await store.append(live)
         let rows = try await store.readings(from: origin, to: origin.addingTimeInterval(660))
-        XCTAssertEqual(rows[0].session, rows[2].session) // Exactly three minutes stays continuous.
-        XCTAssertNotEqual(rows[2].session, rows[3].session)
+        XCTAssertEqual(rows.count, 11)
+        XCTAssertEqual(rows[0].session, rows[2].session)
+        XCTAssertEqual(rows[2].session, rows[3].session)
         XCTAssertEqual(rows[3].session, rows[4].session)
+        XCTAssertEqual(Array(rows[1..<10]).map(\.percent), Array(repeating: 80, count: 9))
         XCTAssertNil(HistoryAnalysis.rate(rows))
         let chart = try await store.chart(from: origin, to: origin.addingTimeInterval(660))
-        XCTAssertEqual(chart.segments.count, 2)
-        XCTAssertEqual(chart.sampleCount, 6)
+        XCTAssertEqual(chart.segments.count, 1)
+        XCTAssertEqual(chart.sampleCount, 11)
     }
 
     func testOccupiedMinuteWithoutCandidateSplitsSession() async throws {
@@ -145,7 +147,7 @@ final class PowerlogTests: XCTestCase {
         let rows = try await store.readings(from: origin, to: origin.addingTimeInterval(180))
         XCTAssertTrue(rows.isEmpty)
         let retry = try await store.backfill([sample(5), sample(65)], before: origin.addingTimeInterval(180))
-        XCTAssertEqual(retry, 2)
+        XCTAssertEqual(retry, 3)
     }
 
     func testBackfillConnectsRestartGapInChartButNotRates() async throws {
@@ -175,7 +177,7 @@ final class PowerlogTests: XCTestCase {
             before: origin.addingTimeInterval(660))
         let chart = try await store.chart(from: origin, to: origin.addingTimeInterval(660))
         XCTAssertEqual(chart.segments.count, 3)
-        XCTAssertEqual(chart.segments.map { $0.count }, [2, 1, 2])
+        XCTAssertEqual(chart.segments.map { $0.count }, [2, 7, 2])
     }
 
     func testMinuteBoundaryRoundingIsIdempotent() async throws {
